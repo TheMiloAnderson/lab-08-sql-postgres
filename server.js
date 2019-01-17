@@ -18,7 +18,7 @@ app.use(cors());
 
 app.get('/location', getLocation);
 app.get('/weather', getWeather);
-//app.get('/yelp', searchFood);
+app.get('/yelp', getRestaurants);
 //app.get('/movies', searchMovies);
 
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
@@ -40,6 +40,16 @@ function Location(query, res) {
   this.longitude = res.body.results[0].geometry.location.lng;
 }
  */
+
+/*  function getData(req, res) {
+  const dataHandler = {
+    query: req.query.data,
+    cacheHit: (results) => {
+      console.log('getData cacheHit - using SQL');
+      res.send(results.rows[0]);
+    }
+  };
+ } */
 
 // --- LOCATION --- //
 
@@ -121,9 +131,70 @@ function getWeather(req, res) {
         .catch(console.error);
     }
   }
-  Weather.lookup(handler);
+  dataLookup(handler, 'weathers');
 }
 
+function getRestaurants(req, res) {
+  const handler = {
+    location: req.query.data,
+    cacheHit: function(result) {
+      res.send(result.rows);
+    },
+    cacheMiss: function() {
+      Restaurants.fetch(req.query.data)
+        .then((results) => res.send(results))
+        .catch(console.error);
+    }
+  }
+  dataLookup(handler, 'restaurants');
+}
+
+Restaurants.fetch = function(location) {
+  const url = `https://api.yelp.com/v3/businesses/search?term=restaurants&latitude=${location.latitude}&longitude=${location.longitude}`;
+  return superagent.get(url)
+    .set('Authorization', `Bearer ${process.env.YELP_API_KEY}`)
+    .then((result) => {
+      const foodReviews = result.body.businesses.map((restaurant) => {
+        const listing = new Restaurants(restaurant);
+        listing.save(location.id);
+        return listing;
+      });
+      return foodReviews;
+    });
+}
+
+function Restaurants(restaurant) {
+  this.name = restaurant.name;
+  this.url = restaurant.url;
+  this.rating = restaurant.rating;
+  this.price = restaurant.price;
+  this.image_url = restaurant.image_url;
+}
+
+Restaurants.prototype.save = function(id) {
+  const SQL = `INSERT INTO restaurants (name, url, rating, price, image_url, location_id) VALUES ($1, $2, $3, $4, $5, $6);`;
+  const values = Object.values(this);
+  values.push(id);
+  client.query(SQL, values);
+}
+
+function dataLookup(handler, table) {
+  const SQL = `SELECT * FROM ${table} WHERE location_id=$1`;
+  const values = [handler.location.id];
+  client.query(SQL, values)
+    .then((result) => {
+      if (result.rowCount > 0) {
+        console.log('Got data from SQL');
+        handler.cacheHit(result);
+      } else {
+        console.log('Got data from API');
+        handler.cacheMiss();
+      }
+    })
+    .catch(err => handleError(err));
+}
+
+/* 
 Weather.lookup = function(handler) {
   const SQL = `SELECT * FROM weathers WHERE location_id=$1`;
   const values = [handler.location.id];
@@ -139,6 +210,7 @@ Weather.lookup = function(handler) {
     })
     .catch(err => handleError(err));
 }
+ */
 
 Weather.fetch = function(location) {
   const url = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${location.latitude},${location.longitude}`;
