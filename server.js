@@ -8,7 +8,6 @@ const pg = require('pg');
 require('dotenv').config();
 const PORT = process.env.PORT;
 
-// TODO look at lab markdown for db url windows
 const client = new pg.Client(process.env.DATABASE_URL);
 client.connect();
 client.on('err', err => console.log(err));
@@ -18,9 +17,9 @@ const app = express();
 app.use(cors());
 
 app.get('/location', getLocation);
-app.get('/weather', searchWeather);
-app.get('/yelp', searchFood);
-app.get('/movies', searchMovies);
+app.get('/weather', getWeather);
+//app.get('/yelp', searchFood);
+//app.get('/movies', searchMovies);
 
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
 /* 
@@ -62,6 +61,7 @@ function getLocation(req, res) {
 Location.lookupLocation = (handler) => {
   const SQL = `SELECT * FROM  locations WHERE search_query=$1`;
   const values = [handler.query];
+  //console.log('lookupLocation', values);
   return client.query(SQL, values)
     .then((results) => {
       if (results.rowCount > 0) {
@@ -74,14 +74,16 @@ Location.lookupLocation = (handler) => {
 }
 
 Location.fetchLocation = (query) => {
+  //console.log('query param', query);
   const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${query}&key=${process.env.GEOCODE_API_KEY}`;
 
   return superagent.get(url)
     .then((apiResponse) => {
-      if (!apiResponse.body.length) {
+      //console.log('apiResponse', apiResponse.body.results)
+      if (!apiResponse.body.results.length) {
         throw 'No Data';
       } else {
-        let location = new Location(query, apiResponse);
+        let location = new Location(query, apiResponse.body.results[0]);
         return location.save()
           .then((result) => {
             location.id = result.rows[0].id;
@@ -89,7 +91,7 @@ Location.fetchLocation = (query) => {
           });
       }
     })
-    .catch((err) => handleError(err, res));
+    .catch((err) => handleError(err));
 };
 
 function Location(query, data) {
@@ -101,11 +103,70 @@ function Location(query, data) {
 
 Location.prototype.save = function() {
   let SQL = `INSERT INTO locations (search_query, formatted_query, latitude, longitude)
-    VALUES ($1, $2, $3, $4) returning id;`;
+    VALUES ($1, $2, $3, $4) RETURNING id;`;
   let values = [this.search_query, this.formatted_query, this.latitude, this.longitude];
+  //console.log('THESE ARE THE VALUES', values);
   return client.query(SQL, values);
 };
 
+function getWeather(req, res) {
+  const handler = {
+    location: req.query.data,
+    cacheHit: function(result) {
+      res.send(result.rows);
+    },
+    cacheMiss: function() {
+      Weather.fetch(req.query.data)
+        .then((results) => res.send(results))
+        .catch(console.error);
+    }
+  }
+  Weather.lookup(handler);
+}
+
+Weather.lookup = function(handler) {
+  const SQL = `SELECT * FROM weathers WHERE location_id=$1`;
+  const values = [handler.location.id];
+  client.query(SQL, values)
+    .then((result) => {
+      if (result.rowCount > 0) {
+        console.log('Got weather from SQL');
+        handler.cacheHit(result);
+      } else {
+        console.log('Got weather from API');
+        handler.cacheMiss();
+      }
+    })
+    .catch(err => handleError(err));
+}
+
+Weather.fetch = function(location) {
+  const url = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${location.latitude},${location.longitude}`;
+  return superagent.get(url)
+    .then((result) => {
+      const weatherSummaries = result.body.daily.data.map((day) => {
+        const summary = new Weather(day);
+        summary.save(location.id);
+        return summary;
+      });
+      return weatherSummaries;
+    });
+}
+
+function Weather(day) {
+  this.forecast = day.summary;
+  this.time = new Date(day.time * 1000)
+    .toLocaleDateString('en-US', {weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'});
+}
+
+Weather.prototype.save = function(id) {
+  const SQL = `INSERT INTO weathers (forecast, time, location_id) VALUES ($1, $2, $3);`;
+  const values = Object.values(this);
+  values.push(id);
+  client.query(SQL, values);
+}
+
+/* 
 function searchWeather(req, res) {
   const url = `https://api.darksky.net/forecast/${process.env.WEATHER_API_KEY}/${req.query.data.latitude},${req.query.data.longitude}`;
 
@@ -124,7 +185,7 @@ function Weather(day) {
   this.time = new Date(day.time * 1000)
     .toLocaleDateString('en-US', {weekday: 'short', year: 'numeric', month: 'short', day: 'numeric'});
 }
-
+ */
 function searchFood(req, res) {
   const url = `https://api.yelp.com/v3/businesses/search?term=restaurants&latitude=${req.query.data.latitude}&longitude=${req.query.data.longitude}`;
 
